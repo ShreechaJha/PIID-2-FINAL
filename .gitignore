@@ -1,0 +1,49 @@
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# Datasets & Heavy Storage
+DATASETS/
+IMAGES/
+LABELS/
+TEXT/
+*.csv
+*.parquet
+*.xlsx
+*.tsv
+
+# Model Weights & Binaries
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.pkl
+*.joblib
+*.h5
+*.onnx
+
+# Cache & Temp Files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.ipynb_checkpoints/
+.pytest_cache/
+.tox/
+.DS_Store
+Thumbs.db
+
+# Large Logs & Cache
+*.log
+vision_image_checkpoint.csv
+vision_text_features.csv
+vision_features.csv
+unified_features.parquet
+feature_summary.json
+test_eval_concat_fix.csv
+corrected_splits.csv
+split_verification_report.csv
+validation_report.csv
+statistics.json

@@ -1,0 +1,180 @@
+{
+  "metadata": {
+    "version": "1.0.0",
+    "created": "2026-06-29",
+    "framework": "Agentic AI Governance Framework for Multimodal Prompt Injection Detection",
+    "description": "Priority-ordered governance rules for insurance document LLM pipelines. Rules are grounded in OWASP LLM Top 10 2025 and NIST AI RMF. All thresholds tuned on validation set — never on test set.",
+    "decision_system": {
+      "BLOCK": "Document is rejected. Not passed to the insurance LLM under any circumstance.",
+      "SANITIZE": "Detected injection spans are redacted ([REDACTED]) before passing to LLM.",
+      "ALLOW": "Document passes all checks and is forwarded to the insurance LLM."
+    },
+    "threshold_tuning_set": "validation",
+    "policy_frameworks": [
+      "OWASP LLM Top 10 2025 (https://owasp.org/www-project-top-10-for-large-language-model-applications/)",
+      "NIST AI RMF 1.0 (https://www.nist.gov/system/files/documents/2023/01/26/AI RMF 1.0.pdf)",
+      "ISO 27001:2022 Information Security"
+    ]
+  },
+  "rules": [
+    {
+      "id": "G1",
+      "priority": 1,
+      "name": "Critical Risk Unconditional Block",
+      "description": "Any document with risk_score in CRITICAL range is blocked regardless of other signals. This is a hard policy boundary — no ML uncertainty can override it.",
+      "condition": {
+        "risk_score": {"gte": 0.80}
+      },
+      "action": "BLOCK",
+      "severity": "CRITICAL",
+      "policy_ref": "OWASP LLM01:2025 — Prompt Injection",
+      "policy_source": "OWASP LLM Top 10 2025",
+      "reason_template": "BLOCKED by rule G1 (Critical Risk Unconditional Block). Risk score {risk_score:.3f} exceeds critical threshold (≥0.80). Per OWASP LLM01:2025, high-confidence prompt injection attempts must be rejected before reaching the LLM. No further processing permitted.",
+      "sanitization_action": null
+    },
+    {
+      "id": "G2",
+      "priority": 2,
+      "name": "Hidden Text Detection Block",
+      "description": "Documents with confirmed hidden text (near-white text on white background) are always blocked. Hidden text is a steganographic attack pattern — it survives naive OCR and is designed to be invisible to human reviewers.",
+      "condition": {
+        "hidden_text_detected": true
+      },
+      "action": "BLOCK",
+      "severity": "CRITICAL",
+      "policy_ref": "OWASP LLM01:2025 — Indirect Prompt Injection; ISO 27001:2022 A.8.22",
+      "policy_source": "OWASP LLM Top 10 2025 + ISO 27001",
+      "reason_template": "BLOCKED by rule G2 (Hidden Text Detection). Near-white text detected in document image — a steganographic injection technique invisible to human reviewers. This attack pattern falls under OWASP LLM01:2025 Indirect Prompt Injection. Risk score: {risk_score:.3f}. Vision score: {vision_score:.3f}.",
+      "sanitization_action": null
+    },
+    {
+      "id": "G3",
+      "priority": 3,
+      "name": "High Keyword Density Block",
+      "description": "Documents with very high injection keyword density combined with elevated prompt score are blocked. Keyword density > 0.40 with prompt score > 0.85 indicates a direct instruction-override attack.",
+      "condition": {
+        "keyword_density": {"gte": 0.40},
+        "prompt_score": {"gte": 0.85}
+      },
+      "action": "BLOCK",
+      "severity": "HIGH",
+      "policy_ref": "OWASP LLM01:2025 — Direct Prompt Injection",
+      "policy_source": "OWASP LLM Top 10 2025",
+      "reason_template": "BLOCKED by rule G3 (High Keyword Density). Injection keyword density {keyword_density:.3f} exceeds threshold (≥0.40) combined with high RoBERTa malicious probability {prompt_score:.3f} (≥0.85). Pattern consistent with direct instruction-override attack per OWASP LLM01:2025.",
+      "sanitization_action": null
+    },
+    {
+      "id": "G4",
+      "priority": 4,
+      "name": "Watermark Attack Block",
+      "description": "Documents where significant new text appears only at high contrast (watermark injection pattern) combined with elevated risk are blocked. Watermark score > 0.50 with risk > 0.65 indicates a low-opacity hidden instruction attack.",
+      "condition": {
+        "watermark_score": {"gte": 0.50},
+        "risk_score": {"gte": 0.65}
+      },
+      "action": "BLOCK",
+      "severity": "HIGH",
+      "policy_ref": "OWASP LLM01:2025 — Indirect Prompt Injection",
+      "policy_source": "OWASP LLM Top 10 2025",
+      "reason_template": "BLOCKED by rule G4 (Watermark Attack Detection). {watermark_score:.1%} of text only visible at high contrast — consistent with low-opacity watermark injection. Risk score: {risk_score:.3f}. This technique evades standard OCR and targets indirect injection per OWASP LLM01:2025.",
+      "sanitization_action": null
+    },
+    {
+      "id": "G5",
+      "priority": 5,
+      "name": "Sensitive Data Exfiltration Attack Block",
+      "description": "Documents with HIGH risk and elevated vision score where the attack family is predicted as data exfiltration are always blocked. Data exfiltration attempts to extract policyholder PII via LLM — catastrophic if successful.",
+      "condition": {
+        "risk_score": {"gte": 0.65},
+        "vision_score": {"gte": 0.40},
+        "attack_family": {"in": ["data exfiltration", "exfiltration", "pii extraction", "sensitive data"]}
+      },
+      "action": "BLOCK",
+      "severity": "CRITICAL",
+      "policy_ref": "OWASP LLM06:2025 — Sensitive Information Disclosure; NIST AI RMF: GOVERN 1.7",
+      "policy_source": "OWASP LLM Top 10 2025 + NIST AI RMF",
+      "reason_template": "BLOCKED by rule G5 (Data Exfiltration Attack). Predicted attack family '{attack_family}' combined with risk score {risk_score:.3f} and vision score {vision_score:.3f} indicates a sensitive information disclosure attempt. Per OWASP LLM06:2025 and NIST AI RMF GOVERN 1.7, exfiltration attempts must be blocked to protect policyholder PII.",
+      "sanitization_action": null
+    },
+    {
+      "id": "G6",
+      "priority": 6,
+      "name": "Excessive Agency / Claim Manipulation Block",
+      "description": "Documents with high risk where the attack is classified as claim manipulation are blocked. Successful claim manipulation could result in fraudulent approvals or denials — a direct financial and regulatory risk.",
+      "condition": {
+        "risk_score": {"gte": 0.70},
+        "attack_family": {"in": ["claim manipulation", "fraud", "policy manipulation", "claim fraud"]}
+      },
+      "action": "BLOCK",
+      "severity": "CRITICAL",
+      "policy_ref": "OWASP LLM08:2025 — Excessive Agency; IRDAI AML Guidelines",
+      "policy_source": "OWASP LLM Top 10 2025 + IRDAI",
+      "reason_template": "BLOCKED by rule G6 (Claim Manipulation). Predicted attack family '{attack_family}' with risk score {risk_score:.3f} indicates an attempt to manipulate insurance claim outcomes. This falls under OWASP LLM08:2025 (Excessive Agency) and IRDAI anti-fraud guidelines. Financial integrity risk classified as CRITICAL.",
+      "sanitization_action": null
+    },
+    {
+      "id": "G7",
+      "priority": 7,
+      "name": "High Risk + Footer Injection Sanitize",
+      "description": "Documents with HIGH risk and suspicious footer content undergo sanitization. Footer injections are often legitimate documents with appended malicious instructions — the document body may still be valid.",
+      "condition": {
+        "risk_score": {"gte": 0.55},
+        "footer_density": {"gte": 0.30}
+      },
+      "action": "SANITIZE",
+      "severity": "HIGH",
+      "policy_ref": "OWASP LLM01:2025 — Indirect Prompt Injection",
+      "policy_source": "OWASP LLM Top 10 2025",
+      "reason_template": "SANITIZE by rule G7 (Footer Injection). {footer_density:.1%} of text boxes located in footer region (≥30%) with risk score {risk_score:.3f}. Footer region will be redacted before LLM processing. Document body retained for claim processing. Per OWASP LLM01:2025 indirect injection mitigation.",
+      "sanitization_action": "redact_footer_region"
+    },
+    {
+      "id": "G8",
+      "priority": 8,
+      "name": "Medium Risk Multimodal Sanitize",
+      "description": "Documents with medium-HIGH risk score from the fusion model, or with elevated vision score, are sanitized. Both text and image signals are suspicious but not definitively malicious.",
+      "condition": {
+        "risk_score": {"gte": 0.50},
+        "vision_score": {"gte": 0.35}
+      },
+      "action": "SANITIZE",
+      "severity": "MEDIUM",
+      "policy_ref": "OWASP LLM01:2025; NIST AI RMF: MAP 5.1",
+      "policy_source": "OWASP LLM Top 10 2025 + NIST AI RMF",
+      "reason_template": "SANITIZE by rule G8 (Medium Multimodal Risk). Fusion risk score {risk_score:.3f} and vision score {vision_score:.3f} exceed dual thresholds. Detected injection spans will be redacted ([REDACTED]) before LLM processing. Human review recommended. Per NIST AI RMF MAP 5.1.",
+      "sanitization_action": "redact_injection_spans"
+    },
+    {
+      "id": "G9",
+      "priority": 9,
+      "name": "Elevated Prompt Score Sanitize",
+      "description": "Documents where RoBERTa gives elevated malicious probability (0.55-0.80) but risk model is below block threshold undergo sanitization. Captures model uncertainty range.",
+      "condition": {
+        "prompt_score": {"gte": 0.55},
+        "risk_score": {"lt": 0.80}
+      },
+      "action": "SANITIZE",
+      "severity": "MEDIUM",
+      "policy_ref": "OWASP LLM01:2025",
+      "policy_source": "OWASP LLM Top 10 2025",
+      "reason_template": "SANITIZE by rule G9 (Elevated Prompt Score). RoBERTa malicious probability {prompt_score:.3f} is elevated (≥0.55) but below block threshold. Conservative sanitization applied — injection-like text spans redacted before LLM processing.",
+      "sanitization_action": "redact_injection_spans"
+    },
+    {
+      "id": "G10",
+      "priority": 10,
+      "name": "Critical Severity Metadata Flag",
+      "description": "Documents marked with critical severity in metadata that also have non-trivial vision signals are sanitized as a precaution.",
+      "condition": {
+        "severity": {"in": ["critical", "high"]},
+        "vision_score": {"gte": 0.20}
+      },
+      "action": "SANITIZE",
+      "severity": "MEDIUM",
+      "policy_ref": "NIST AI RMF: GOVERN 6.1",
+      "policy_source": "NIST AI RMF",
+      "reason_template": "SANITIZE by rule G10 (Critical Severity Metadata). Document severity is '{severity}' with non-trivial visual signals (vision_score={vision_score:.3f}). Precautionary sanitization applied per NIST AI RMF GOVERN 6.1 (high-stakes automated decision review).",
+      "sanitization_action": "redact_injection_spans"
+    }
+  ]
+}
