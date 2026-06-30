@@ -1,154 +1,167 @@
 """
-OCR Engine Adapter — Swappable OCR backend for the PIID pipeline.
-=================================================================
-Provides a unified interface for OCR engines (EasyOCR, PaddleOCR, Tesseract).
-The classifier code calls only the abstract interface, never a specific engine.
+AGENTS/ocr_adapter.py
+=====================
+Unified OCR interface used by module_f_step1_ocr_cache.py and VisionAgent.
 
-Usage:
-    from ocr_adapter import OCREngineFactory
+Provides:
+  OCREngineFactory.create(engine, languages, gpu) → OCREngine
+  OCREngine.run(image_path)   → OCRResult(text, confidence, boxes, duration_ms)
+  OCREngine.run_array(np_img) → OCRResult
 
-    engine = OCREngineFactory.create("easyocr", languages=["en"])
-    text, confidence = engine.run("path/to/image.png")
+Design decisions:
+  - Factory pattern allows future swap to PaddleOCR / Tesseract without
+    touching downstream code.
+  - All outputs are typed dataclasses to prevent silent field mismatches.
+  - Confidence is always normalised to [0, 1] regardless of backend.
 """
 
-import os
-from abc import ABC, abstractmethod
-from typing import Tuple, List, Optional
+from __future__ import annotations
+
+import time
+import warnings
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+import numpy as np
+
+warnings.filterwarnings("ignore", category=UserWarning)
+
+# ── Data Structures ──────────────────────────────────────────────────────────
 
 
-class OCREngine(ABC):
-    """Abstract base class for OCR engines."""
+@dataclass
+class TextBox:
+    """One detected text region from OCR."""
+    text: str
+    confidence: float          # [0, 1]
+    bbox: Tuple[float, float, float, float]  # (x_min, y_min, x_max, y_max) in pixels
 
-    @abstractmethod
-    def run(self, image_path: str) -> Tuple[str, float]:
+
+@dataclass
+class OCRResult:
+    """Aggregated OCR output for a single document image."""
+    text: str                         # Full concatenated text
+    confidence: float                 # Mean confidence across all boxes
+    boxes: List[TextBox] = field(default_factory=list)
+    duration_ms: float = 0.0
+    engine: str = "easyocr"
+    error: Optional[str] = None       # Set if OCR failed gracefully
+
+    @property
+    def is_empty(self) -> bool:
+        return len(self.text.strip()) == 0
+
+
+# ── EasyOCR Backend ──────────────────────────────────────────────────────────
+
+
+class EasyOCREngine:
+    """
+    Wraps EasyOCR reader.  Lazily initialised on first call so that
+    import of ocr_adapter does not force GPU/model initialisation.
+    """
+
+    def __init__(self, languages: List[str], gpu: bool = False):
+        self.languages = languages
+        self.gpu = gpu
+        self._reader = None
+
+    def _get_reader(self):
+        if self._reader is None:
+            import easyocr  # local import — allows module import without easyocr installed
+            self._reader = easyocr.Reader(self.languages, gpu=self.gpu, verbose=False)
+        return self._reader
+
+    def run(self, image_path: str) -> OCRResult:
+        """Run OCR on a file path."""
+        path = Path(image_path)
+        if not path.exists():
+            return OCRResult(
+                text="", confidence=0.0,
+                error=f"File not found: {image_path}"
+            )
+        try:
+            t0 = time.perf_counter()
+            raw = self._get_reader().readtext(str(path), detail=1)
+            duration_ms = (time.perf_counter() - t0) * 1000
+            return self._parse_raw(raw, duration_ms)
+        except Exception as exc:
+            return OCRResult(
+                text="", confidence=0.0,
+                error=str(exc)
+            )
+
+    def run_array(self, img_array: np.ndarray) -> OCRResult:
+        """Run OCR on an in-memory NumPy image (H×W×C, uint8)."""
+        try:
+            t0 = time.perf_counter()
+            raw = self._get_reader().readtext(img_array, detail=1)
+            duration_ms = (time.perf_counter() - t0) * 1000
+            return self._parse_raw(raw, duration_ms)
+        except Exception as exc:
+            return OCRResult(
+                text="", confidence=0.0,
+                error=str(exc)
+            )
+
+    @staticmethod
+    def _parse_raw(raw: list, duration_ms: float) -> OCRResult:
         """
-        Run OCR on a single image.
-
-        Args:
-            image_path: Absolute or relative path to the image file.
-
-        Returns:
-            Tuple of (extracted_text, mean_confidence).
-            extracted_text: All detected text concatenated with spaces.
-            mean_confidence: Mean confidence score across all detections (0.0–1.0).
-                             Returns 0.0 if no text is detected.
+        Convert EasyOCR raw output to OCRResult.
+        EasyOCR returns: [ ([[x1,y1],[x2,y1],[x2,y2],[x1,y2]], text, conf), ... ]
         """
-        pass
+        boxes: List[TextBox] = []
+        texts: List[str] = []
+        confidences: List[float] = []
 
-    @abstractmethod
-    def name(self) -> str:
-        """Return the engine name for logging."""
-        pass
+        for (quad, text, conf) in raw:
+            xs = [pt[0] for pt in quad]
+            ys = [pt[1] for pt in quad]
+            bbox = (min(xs), min(ys), max(xs), max(ys))
+            conf_clamped = max(0.0, min(1.0, float(conf)))
+            boxes.append(TextBox(text=text, confidence=conf_clamped, bbox=bbox))
+            texts.append(text)
+            confidences.append(conf_clamped)
 
+        full_text = " ".join(texts)
+        mean_conf = float(np.mean(confidences)) if confidences else 0.0
 
-class EasyOCREngine(OCREngine):
-    """EasyOCR-based OCR engine (primary engine)."""
-
-    def __init__(self, languages: Optional[List[str]] = None, gpu: bool = True):
-        """
-        Initialize EasyOCR reader.
-
-        Args:
-            languages: List of language codes (default: ["en"]).
-            gpu: Whether to use GPU acceleration (default: True, falls back to CPU).
-        """
-        import easyocr
-        self.languages = languages or ["en"]
-        self.reader = easyocr.Reader(self.languages, gpu=gpu)
-
-    def run(self, image_path: str) -> Tuple[str, float]:
-        """Run EasyOCR on a single image and return (text, confidence)."""
-        if not os.path.exists(image_path):
-            raise FileNotFoundError(f"Image not found: {image_path}")
-
-        results = self.reader.readtext(image_path)
-
-        if not results:
-            return ("", 0.0)
-
-        # Each result is (bbox, text, confidence)
-        texts = []
-        confidences = []
-        for (_bbox, text, conf) in results:
-            texts.append(text.strip())
-            confidences.append(conf)
-
-        concatenated_text = " ".join(texts)
-        mean_confidence = sum(confidences) / len(confidences) if confidences else 0.0
-
-        return (concatenated_text, round(mean_confidence, 4))
-
-    def name(self) -> str:
-        return "EasyOCR"
-
-
-class PaddleOCREngine(OCREngine):
-    """PaddleOCR-based OCR engine (future implementation)."""
-
-    def __init__(self, languages: Optional[List[str]] = None, gpu: bool = True):
-        raise NotImplementedError(
-            "PaddleOCR engine is not yet implemented. "
-            "Install paddleocr and implement this class when ready."
+        return OCRResult(
+            text=full_text,
+            confidence=mean_conf,
+            boxes=boxes,
+            duration_ms=duration_ms,
+            engine="easyocr",
         )
 
-    def run(self, image_path: str) -> Tuple[str, float]:
-        raise NotImplementedError
 
-    def name(self) -> str:
-        return "PaddleOCR"
-
-
-class TesseractOCREngine(OCREngine):
-    """Tesseract-based OCR engine (future implementation)."""
-
-    def __init__(self, languages: Optional[List[str]] = None, **kwargs):
-        raise NotImplementedError(
-            "Tesseract engine is not yet implemented. "
-            "Install pytesseract and implement this class when ready."
-        )
-
-    def run(self, image_path: str) -> Tuple[str, float]:
-        raise NotImplementedError
-
-    def name(self) -> str:
-        return "Tesseract"
+# ── Factory ──────────────────────────────────────────────────────────────────
 
 
 class OCREngineFactory:
-    """Factory for creating OCR engine instances."""
+    """
+    Usage:
+        engine = OCREngineFactory.create("easyocr", languages=["en"], gpu=True)
+        result = engine.run("/path/to/image.png")
+        print(result.text, result.confidence)
+    """
 
-    _registry = {
-        "easyocr": EasyOCREngine,
-        "paddleocr": PaddleOCREngine,
-        "tesseract": TesseractOCREngine,
-    }
+    _BACKENDS = {"easyocr": EasyOCREngine}
 
     @classmethod
-    def create(cls, engine_name: str, **kwargs) -> OCREngine:
-        """
-        Create an OCR engine by name.
-
-        Args:
-            engine_name: One of "easyocr", "paddleocr", "tesseract".
-            **kwargs: Passed to the engine constructor (e.g., languages, gpu).
-
-        Returns:
-            An initialized OCREngine instance.
-        """
-        engine_name = engine_name.lower().strip()
-        if engine_name not in cls._registry:
-            available = ", ".join(cls._registry.keys())
+    def create(
+        cls,
+        engine: str = "easyocr",
+        languages: Optional[List[str]] = None,
+        gpu: bool = False,
+    ) -> EasyOCREngine:
+        if languages is None:
+            languages = ["en"]
+        backend_cls = cls._BACKENDS.get(engine)
+        if backend_cls is None:
             raise ValueError(
-                f"Unknown OCR engine '{engine_name}'. Available: {available}"
+                f"Unknown OCR engine: '{engine}'. "
+                f"Available: {list(cls._BACKENDS.keys())}"
             )
-        return cls._registry[engine_name](**kwargs)
-
-    @classmethod
-    def available_engines(cls) -> List[str]:
-        """Return list of registered engine names."""
-        return list(cls._registry.keys())
-
-
-if __name__ == "__main__":
-    print(f"Available OCR engines: {OCREngineFactory.available_engines()}")
-    print("Use OCREngineFactory.create('easyocr') to instantiate.")
+        return backend_cls(languages=languages, gpu=gpu)

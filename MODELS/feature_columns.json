@@ -1,0 +1,13 @@
+{
+  "columns": [
+    "malicious_probability",
+    "ocr_confidence",
+    "tiny_text_count",
+    "footer_text_density",
+    "watermark_score",
+    "hidden_text_score",
+    "keyword_density",
+    "vision_score",
+    "severity_enc"
+  ]
+}
