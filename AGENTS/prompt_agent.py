@@ -92,17 +92,17 @@ class PromptAgent:
         from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
         if not self.model_dir.exists():
-            raise FileNotFoundError(
-                f"Model not found at: {self.model_dir}\n"
-                "Run Notebook 02 to train and save the model first."
+            print(f"[PromptAgent] Local model not found at {self.model_dir}. Falling back to 'roberta-base' from Hugging Face Hub.")
+            self._tokenizer = AutoTokenizer.from_pretrained("roberta-base")
+            self._model = AutoModelForSequenceClassification.from_pretrained("roberta-base")
+        else:
+            if (self.model_dir / "best_strategyA").exists() and (self.model_dir / "best_strategyA" / "config.json").exists():
+                self.model_dir = self.model_dir / "best_strategyA"
+            print(f"[PromptAgent] Loading model from: {self.model_dir}")
+            self._tokenizer = AutoTokenizer.from_pretrained(str(self.model_dir))
+            self._model = AutoModelForSequenceClassification.from_pretrained(
+                str(self.model_dir)
             )
-        if (self.model_dir / "best_strategyA").exists() and (self.model_dir / "best_strategyA" / "config.json").exists():
-            self.model_dir = self.model_dir / "best_strategyA"
-        print(f"[PromptAgent] Loading model from: {self.model_dir}")
-        self._tokenizer = AutoTokenizer.from_pretrained(str(self.model_dir))
-        self._model = AutoModelForSequenceClassification.from_pretrained(
-            str(self.model_dir)
-        )
         if self._device_str:
             self._device = torch.device(self._device_str)
         else:

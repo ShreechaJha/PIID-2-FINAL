@@ -100,12 +100,19 @@ class RiskAgent:
         sc_path  = self.models_dir / self.SCALER_FILENAME
         col_path = self.models_dir / self.COLUMNS_FILENAME
 
+        # Fallback if model files are missing (e.g. on Streamlit Cloud)
         for p in [lr_path, sc_path, col_path]:
             if not p.exists():
-                raise FileNotFoundError(
-                    f"Model file missing: {p}\n"
-                    "Run Notebook 05 to train and save the risk model."
-                )
+                print(f"[RiskAgent] Model file missing: {p}. Running in fallback heuristic mode.")
+                self._lr = "FALLBACK"
+                self._scaler = None
+                self._columns = [
+                    "malicious_probability", "ocr_confidence", "tiny_text_count",
+                    "footer_text_density", "watermark_score", "hidden_text_score",
+                    "keyword_density", "vision_score", "severity_enc"
+                ]
+                return
+
         with open(lr_path, "rb") as f:
             self._lr = pickle.load(f)
         with open(sc_path, "rb") as f:
@@ -131,6 +138,18 @@ class RiskAgent:
         """
         self._load()
         t0 = time.perf_counter()
+
+        if self._lr == "FALLBACK":
+            prob = max(features.get("malicious_probability", 0.5), features.get("vision_score", 0.0))
+            prob = float(np.clip(prob, 0.0, 1.0))
+            duration_ms = (time.perf_counter() - t0) * 1000
+            return RiskScore(
+                sample_id=sample_id,
+                risk_score=prob,
+                risk_level=_risk_level(prob),
+                feature_values=features,
+                duration_ms=duration_ms,
+            )
 
         # Build feature vector in correct column order
         x = np.array([[features.get(col, 0.0) for col in self._columns]])
@@ -158,6 +177,24 @@ class RiskAgent:
             sample_ids = [str(i) for i in range(len(features_list))]
 
         t0 = time.perf_counter()
+
+        if self._lr == "FALLBACK":
+            probs = np.array([
+                max(f.get("malicious_probability", 0.5), f.get("vision_score", 0.0))
+                for f in features_list
+            ])
+            total_ms = (time.perf_counter() - t0) * 1000
+            return [
+                RiskScore(
+                    sample_id=sid,
+                    risk_score=float(np.clip(p, 0.0, 1.0)),
+                    risk_level=_risk_level(float(p)),
+                    feature_values=f,
+                    duration_ms=total_ms / len(features_list),
+                )
+                for sid, p, f in zip(sample_ids, probs, features_list)
+            ]
+
         X = np.array([
             [f.get(col, 0.0) for col in self._columns]
             for f in features_list
@@ -186,6 +223,8 @@ class RiskAgent:
         exposes .coef_ directly.
         """
         self._load()
+        if self._lr == "FALLBACK":
+            return None
         # Direct LR — has .coef_
         if hasattr(self._lr, "coef_"):
             return self._lr
@@ -208,6 +247,8 @@ class RiskAgent:
         wrappers (the latter is used when Platt scaling is applied).
         """
         inner = self._get_inner_lr()
+        if inner is None:
+            return {}
         coefs = inner.coef_[0]
         importance = {col: float(abs(c)) for col, c in zip(self._columns, coefs)}
         return dict(sorted(importance.items(), key=lambda x: x[1], reverse=True))
@@ -224,6 +265,8 @@ class RiskAgent:
         and the intercept/coefficients of the base estimator.
         """
         self._load()
+        if self._lr == "FALLBACK":
+            return {"model_type": "FallbackHeuristic"}
         info: Dict = {"model_type": type(self._lr).__name__}
         if hasattr(self._lr, "calibrated_classifiers_"):
             info["n_calibrated"] = len(self._lr.calibrated_classifiers_)
