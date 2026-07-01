@@ -33,7 +33,7 @@ import numpy as np
 
 warnings.filterwarnings("ignore")
 
-# Injection keywords (OWASP LLM01 attack surface vocabulary)
+# Injection keywords (Expanded for Multimodal attacks)
 INJECTION_KEYWORDS = [
     "ignore", "disregard", "forget", "override", "bypass", "pretend",
     "you are now", "act as", "roleplay", "system prompt", "system message",
@@ -43,7 +43,9 @@ INJECTION_KEYWORDS = [
     "reveal", "extract", "exfiltrate", "print your", "show me your",
     "what is your", "tell me your", "confidential", "internal",
     "claim manipulation", "approve claim", "deny claim",
-    "inject", "payload", "malicious",
+    "inject", "payload", "malicious", "hack", "exploit",
+    "translate", "summarize", "evaluate", "secret", "prompt",
+    "developer mode", "do not refuse", "unrestricted", "assistant"
 ]
 
 
@@ -76,12 +78,12 @@ class VisionFeatures:
 # ── Weight configuration (documented for paper) ───────────────────────────────
 
 FEATURE_WEIGHTS = {
-    "keyword_density":    0.35,   # strongest signal — direct semantic attack
-    "hidden_text_score":  0.25,   # high severity — invisible content
-    "watermark_score":    0.15,   # medium — low-opacity hidden text
-    "footer_density":     0.10,   # medium — common injection location
-    "tiny_text_count":    0.10,   # normalised — micro-font evasion
-    "ocr_confidence":     0.05,   # inverted — low confidence = suspicious
+    "keyword_density":    0.60,   # Primary signal for multimodal attacks
+    "hidden_text_score":  0.10,   
+    "watermark_score":    0.05,   
+    "footer_density":     0.05,   
+    "tiny_text_count":    0.05,   
+    "ocr_confidence":     0.15,   # Increased weight for distorted OCR
 }
 
 assert abs(sum(FEATURE_WEIGHTS.values()) - 1.0) < 1e-6, "Weights must sum to 1.0"
@@ -155,13 +157,14 @@ class VisionAgent:
             footer_density = self._footer_text_density(boxes, img_h)
 
             # Feature 4: watermark score
-            watermark_score = self._watermark_score(img, ocr, normal_result)
+            watermark_score, watermark_text = self._watermark_score(img, ocr, normal_result)
 
             # Feature 5: hidden text score
-            hidden_text_score = self._hidden_text_score(img, ocr)
+            hidden_text_score, hidden_text = self._hidden_text_score(img, ocr)
 
             # Feature 6: keyword density
-            keyword_density, total_words = self._keyword_density(normal_result.text)
+            combined_text = f"{normal_result.text} {watermark_text} {hidden_text}"
+            keyword_density, total_words = self._keyword_density(combined_text)
 
             total_boxes = len(boxes)
 
@@ -219,7 +222,7 @@ class VisionAgent:
         )
         return footer_boxes / len(boxes)
 
-    def _watermark_score(self, img, ocr, normal_result) -> float:
+    def _watermark_score(self, img, ocr, normal_result) -> tuple[float, str]:
         """
         Run OCR on a high-contrast version of the image.
         New words appearing only in high-contrast OCR are potential watermarks.
@@ -236,12 +239,12 @@ class VisionAgent:
             new_words = hc_words - normal_words
 
             if not hc_words:
-                return 0.0
-            return min(1.0, len(new_words) / max(1, len(hc_words)))
+                return 0.0, ""
+            return min(1.0, len(new_words) / max(1, len(hc_words))), " ".join(new_words)
         except Exception:
-            return 0.0
+            return 0.0, ""
 
-    def _hidden_text_score(self, img, ocr) -> float:
+    def _hidden_text_score(self, img, ocr) -> tuple[float, str]:
         """
         Detect near-white text on white background.
         Strategy: threshold to isolate near-white pixels, run OCR on mask.
@@ -258,16 +261,18 @@ class VisionAgent:
             enhanced = cv2.convertScaleAbs(masked, alpha=5.0, beta=0)
             result = ocr.run_array(enhanced)
             if result.is_empty or result.error:
-                return 0.0
+                return 0.0, ""
             # Non-empty OCR in near-white region → hidden text detected
-            return 1.0 if len(result.text.strip()) > 3 else 0.0
+            text = result.text.strip()
+            return (1.0 if len(text) > 3 else 0.0), text
         except Exception:
-            return 0.0
+            return 0.0, ""
 
     @staticmethod
     def _keyword_density(text: str):
         """
-        Count injection keywords / total words.
+        Count injection keywords.
+        Highly sensitive: 1 or 2 keywords maxes out the score.
         Returns (density_float, total_word_count).
         """
         if not text:
@@ -277,8 +282,10 @@ class VisionAgent:
         if total == 0:
             return 0.0, 0
         text_lower = text.lower()
-        count = sum(1 for kw in INJECTION_KEYWORDS if kw in text_lower)
-        density = min(1.0, count / max(1, total / 10))  # normalise per 10 words
+        import re
+        count = sum(1 for kw in INJECTION_KEYWORDS if re.search(rf"\b{re.escape(kw)}\b", text_lower))
+        # Spike the score if ANY keyword is found (0.5 per keyword, capped at 1.0)
+        density = min(1.0, count * 0.5)
         return density, total
 
     @staticmethod

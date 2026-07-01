@@ -62,26 +62,17 @@ PROMPT_FEATURES = [
 # Features from the Vision Agent (Phase 3) — text-based, all samples
 VISION_TEXT_FEATURES = [
     "keyword_density",         # float, injection keywords / total words
-    "keyword_count",           # int, raw keyword match count
-    "command_pattern_count",   # int, structural command pattern matches
-    "text_length",             # int, character count
-    "word_count",              # int, total words
-    "suspicious_char_ratio",   # float, non-ASCII character ratio
+    "total_words",             # int, total words
 ]
 
 # Features from the Vision Agent (Phase 3) — image-based, default 0 for text-only
 VISION_IMAGE_FEATURES = [
-    "has_image",               # binary, whether sample had an image
     "ocr_confidence",          # float [0, 1], mean OCR confidence
     "tiny_text_count",         # int, small text box count
-    "tiny_text_ratio",         # float, fraction of tiny text boxes
     "footer_text_density",     # float, text density in footer region
-    "footer_keyword_count",    # int, injection keywords in footer
-    "hidden_text_detected",    # binary, white-on-white text found
-    "hidden_text_count",       # int, number of hidden text regions
-    "watermark_detected",      # binary, hidden watermark content
-    "text_region_count",       # int, total OCR text boxes
-    "spatial_spread",          # float, vertical distribution std dev
+    "watermark_score",         # float, [0, 1] new text found at high contrast
+    "hidden_text_score",       # float, [0, 1] near-white text detection score
+    "total_boxes",             # int, total OCR text boxes
 ]
 
 # Composite vision score
@@ -248,12 +239,12 @@ def load_prompt_predictions(
         # Add Gaussian noise to prevent the risk model from just learning
         # to copy this feature
         rng = np.random.RandomState(42)
-        noise = rng.normal(0, 0.02, size=len(missing_df))
+        noise = rng.normal(0, 0.25, size=len(missing_df))
 
         missing_df["malicious_probability"] = np.where(
             missing_df["label"] == 1,
-            np.clip(0.95 + noise, 0.5, 1.0),   # malicious: ~0.95
-            np.clip(0.05 + noise, 0.0, 0.5),    # benign: ~0.05
+            np.clip(0.70 + noise, 0.0, 1.0),   # malicious: ~0.70
+            np.clip(0.30 + noise, 0.0, 1.0),    # benign: ~0.30
         )
 
         # Combine real predictions with proxies
@@ -275,11 +266,11 @@ def load_prompt_predictions(
 
         proxy = labels_df[["sample_id", "label"]].copy()
         rng = np.random.RandomState(42)
-        noise = rng.normal(0, 0.02, size=len(proxy))
+        noise = rng.normal(0, 0.25, size=len(proxy))
         proxy["malicious_probability"] = np.where(
             proxy["label"] == 1,
-            np.clip(0.95 + noise, 0.5, 1.0),
-            np.clip(0.05 + noise, 0.0, 0.5),
+            np.clip(0.70 + noise, 0.0, 1.0),
+            np.clip(0.30 + noise, 0.0, 1.0),
         )
         return proxy[["sample_id", "malicious_probability"]]
 
@@ -415,7 +406,7 @@ def save_feature_matrix(
         "total_columns": len(df.columns),
         "split_counts": df["split"].value_counts().to_dict(),
         "label_counts": df["label"].value_counts().to_dict(),
-        "samples_with_images": int(df["has_image"].sum()),
+        "samples_with_images": int((df.get("total_boxes", 0) > 0).sum()),
         "feature_stats": {},
     }
 
@@ -554,7 +545,7 @@ def build_feature_matrix(
     print(f"  Total samples:       {len(merged):,}")
     print(f"  Feature columns:     {len(ALL_FEATURE_COLUMNS)}")
     print(f"  Meta columns:        {len(META_COLUMNS)}")
-    print(f"  Samples with images: {int(merged['has_image'].sum()):,}")
+    print(f"  Samples with images: {int((merged.get('total_boxes', 0) > 0).sum()):,}")
     print(f"\n  Split Distribution:")
     for split_name in ["train", "val", "test"]:
         mask = merged["split"] == split_name

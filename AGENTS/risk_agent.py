@@ -100,19 +100,12 @@ class RiskAgent:
         sc_path  = self.models_dir / self.SCALER_FILENAME
         col_path = self.models_dir / self.COLUMNS_FILENAME
 
-        # Fallback if model files are missing (e.g. on Streamlit Cloud)
         for p in [lr_path, sc_path, col_path]:
             if not p.exists():
-                print(f"[RiskAgent] Model file missing: {p}. Running in fallback heuristic mode.")
-                self._lr = "FALLBACK"
-                self._scaler = None
-                self._columns = [
-                    "malicious_probability", "ocr_confidence", "tiny_text_count",
-                    "footer_text_density", "watermark_score", "hidden_text_score",
-                    "keyword_density", "vision_score", "severity_enc"
-                ]
-                return
-
+                raise FileNotFoundError(
+                    f"Model file missing: {p}\n"
+                    "Run Notebook 05 to train and save the risk model."
+                )
         with open(lr_path, "rb") as f:
             self._lr = pickle.load(f)
         with open(sc_path, "rb") as f:
@@ -138,18 +131,6 @@ class RiskAgent:
         """
         self._load()
         t0 = time.perf_counter()
-
-        if self._lr == "FALLBACK":
-            prob = max(features.get("malicious_probability", 0.5), features.get("vision_score", 0.0))
-            prob = float(np.clip(prob, 0.0, 1.0))
-            duration_ms = (time.perf_counter() - t0) * 1000
-            return RiskScore(
-                sample_id=sample_id,
-                risk_score=prob,
-                risk_level=_risk_level(prob),
-                feature_values=features,
-                duration_ms=duration_ms,
-            )
 
         # Build feature vector in correct column order
         x = np.array([[features.get(col, 0.0) for col in self._columns]])
@@ -177,24 +158,6 @@ class RiskAgent:
             sample_ids = [str(i) for i in range(len(features_list))]
 
         t0 = time.perf_counter()
-
-        if self._lr == "FALLBACK":
-            probs = np.array([
-                max(f.get("malicious_probability", 0.5), f.get("vision_score", 0.0))
-                for f in features_list
-            ])
-            total_ms = (time.perf_counter() - t0) * 1000
-            return [
-                RiskScore(
-                    sample_id=sid,
-                    risk_score=float(np.clip(p, 0.0, 1.0)),
-                    risk_level=_risk_level(float(p)),
-                    feature_values=f,
-                    duration_ms=total_ms / len(features_list),
-                )
-                for sid, p, f in zip(sample_ids, probs, features_list)
-            ]
-
         X = np.array([
             [f.get(col, 0.0) for col in self._columns]
             for f in features_list
@@ -216,67 +179,15 @@ class RiskAgent:
 
     # ── Feature importance (for paper) ────────────────────────────────────────
 
-    def _get_inner_lr(self):
-        """
-        Extract the base LogisticRegression from a potentially wrapped
-        CalibratedClassifierCV.  Falls back to the model itself if it
-        exposes .coef_ directly.
-        """
-        self._load()
-        if self._lr == "FALLBACK":
-            return None
-        # Direct LR — has .coef_
-        if hasattr(self._lr, "coef_"):
-            return self._lr
-        # CalibratedClassifierCV wrapper — drill into first calibrated estimator
-        if hasattr(self._lr, "calibrated_classifiers_"):
-            inner = self._lr.calibrated_classifiers_[0].estimator
-            if hasattr(inner, "coef_"):
-                return inner
-        raise AttributeError(
-            "Cannot extract coefficients — model type is not "
-            "LogisticRegression or CalibratedClassifierCV."
-        )
-
     def feature_importance(self) -> Dict[str, float]:
         """
         Returns feature → coefficient magnitude dict (sorted descending).
         Use this to populate Table 3 in the paper.
-
-        Handles both raw LogisticRegression and CalibratedClassifierCV
-        wrappers (the latter is used when Platt scaling is applied).
         """
-        inner = self._get_inner_lr()
-        if inner is None:
-            return {}
-        coefs = inner.coef_[0]
+        self._load()
+        coefs = self._lr.coef_[0]
         importance = {col: float(abs(c)) for col, c in zip(self._columns, coefs)}
         return dict(sorted(importance.items(), key=lambda x: x[1], reverse=True))
-
-    def get_feature_columns(self) -> List[str]:
-        """Return the persisted feature column order."""
-        self._load()
-        return list(self._columns)
-
-    def calibration_info(self) -> Dict:
-        """
-        Returns calibration metadata for the paper's calibration curve.
-        Includes: number of calibrated sub-models, calibration method,
-        and the intercept/coefficients of the base estimator.
-        """
-        self._load()
-        if self._lr == "FALLBACK":
-            return {"model_type": "FallbackHeuristic"}
-        info: Dict = {"model_type": type(self._lr).__name__}
-        if hasattr(self._lr, "calibrated_classifiers_"):
-            info["n_calibrated"] = len(self._lr.calibrated_classifiers_)
-            info["method"] = getattr(self._lr, "method", "sigmoid")
-        inner = self._get_inner_lr()
-        info["intercept"] = float(inner.intercept_[0])
-        info["coefficients"] = {
-            col: float(c) for col, c in zip(self._columns, inner.coef_[0])
-        }
-        return info
 
     # ── Build feature dict (helper for DecisionAgent) ─────────────────────────
 
@@ -284,31 +195,34 @@ class RiskAgent:
     def build_feature_dict(
         malicious_probability: float,
         vision_features: dict,
-        severity: str = "medium",
-        attack_type: str = "unknown",
+        **kwargs,
     ) -> Dict[str, float]:
         """
         Assembles the feature dictionary expected by score().
-        Maps categorical fields to numeric encodings documented in Notebook 04.
-
-        Severity encoding (ordinal — has natural order):
-            low=0, medium=1, high=2, critical=3
+        Matches the columns output by feature_engineer.py.
         """
-        SEV_MAP = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+        mp = malicious_probability
+        vs = vision_features.get("vision_score", 0.0)
+
+        # Cross-agent features (matching Feature Engineer)
+        prompt_vision_agreement = 1.0 if ((mp > 0.5 and vs > 0.1) or (mp <= 0.5 and vs <= 0.1)) else 0.0
+        max_signal = max(mp, vs)
+        signal_product = mp * vs
+        signal_diff = abs(mp - vs)
 
         return {
-            # From PromptAgent
-            "malicious_probability": malicious_probability,
-
-            # From VisionAgent
-            "ocr_confidence":       vision_features.get("ocr_confidence", 0.5),
-            "tiny_text_count":      vision_features.get("tiny_text_count", 0),
-            "footer_text_density":  vision_features.get("footer_text_density", 0.0),
-            "watermark_score":      vision_features.get("watermark_score", 0.0),
-            "hidden_text_score":    vision_features.get("hidden_text_score", 0.0),
-            "keyword_density":      vision_features.get("keyword_density", 0.0),
-            "vision_score":         vision_features.get("vision_score", 0.0),
-
-            # From metadata (encoded)
-            "severity_enc": float(SEV_MAP.get(str(severity).lower(), 1)),
+            "malicious_probability": mp,
+            "keyword_density":       vision_features.get("keyword_density", 0.0),
+            "total_words":           vision_features.get("total_words", 0),
+            "ocr_confidence":        vision_features.get("ocr_confidence", 0.5),
+            "tiny_text_count":       vision_features.get("tiny_text_count", 0),
+            "footer_text_density":   vision_features.get("footer_text_density", 0.0),
+            "watermark_score":       vision_features.get("watermark_score", 0.0),
+            "hidden_text_score":     vision_features.get("hidden_text_score", 0.0),
+            "total_boxes":           vision_features.get("total_boxes", 0),
+            "vision_score":          vs,
+            "prompt_vision_agreement": float(prompt_vision_agreement),
+            "max_signal":            float(max_signal),
+            "signal_product":        float(signal_product),
+            "signal_diff":           float(signal_diff),
         }
